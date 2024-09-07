@@ -1,0 +1,72 @@
+# Python 관련
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 가상 환경
+venv/
+env/
+ENV/
+
+# IDE 관련
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 운영체제 관련
+.DS_Store
+Thumbs.db
+
+# 로그 파일
+*.log
+
+# 환경 변수 파일
+.env
+
+# Streamlit 관련
+.streamlit/
+
+# LangChain 관련
+.langchain/
+
+# 데이터베이스
+*.db
+*.sqlite3
+
+# Chroma 벡터 저장소
+.chroma/
+
+# 기타 임시 파일
+*.tmp
+*.bak
+*.swp
+*~
+
+# API 키나 비밀 정보가 포함될 수 있는 파일
+secrets.json
+config.ini
+
+# 대용량 파일이나 데이터셋
+*.csv
+*.json
+*.txt
