@@ -2,10 +2,10 @@ import streamlit as st
 from langchain.agents import AgentType, initialize_agent
 from langchain_community.llms import OpenAI
 from langchain.tools import Tool
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import CharacterTextSplitter
-from langchain.document_loaders import TextLoader
 from langchain.chains import RetrievalQA
 import os
 

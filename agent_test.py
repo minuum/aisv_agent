@@ -1,4 +1,4 @@
-from langchain.agents import AgentType, initialize_agent
+from langchain_community.agents import AgentType, initialize_agent
 from langchain_community.llms import OpenAI
 from langchain.tools import Tool
 from langchain.embeddings import OpenAIEmbeddings
@@ -114,7 +114,7 @@ print("docker run -it --env-file .env agent-test")
      docker run -it --env-file .env agent-test
 
 이 설정을 통해 코드를 Python 3.12 기반의 Docker 환경에서 실행할 수 있습니다. 
-환경 변수와 의존성이 올바르게 설정되어 있는지 확인하세요.
+환경 변수와 의존성이 올바르게 설���되어 있는지 확인하세요.
 Python 3.12는 최신 버전이므로 일부 라이브러리가 아직 완전히 호환되지 않을 수 있습니다. 
 문제가 발생하면 Python 3.11 또는 3.10으로 다운그레이드하는 것을 고려해보세요.
 """
