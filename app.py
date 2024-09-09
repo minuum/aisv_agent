@@ -1,6 +1,6 @@
 import streamlit as st
 from langchain.agents import AgentType, initialize_agent
-from langchain_community.llms import OpenAI
+from langchain_openai import OpenAI
 from langchain.tools import Tool
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -13,6 +13,7 @@ import tempfile
 from PyPDF2 import PdfReader
 from io import BytesIO
 from langchain_community.vectorstores.utils import filter_complex_metadata
+from langchain.schema import Document
 
 # Streamlit 앱 제목 설정
 st.title("LangChain RAG 시스템 및 에이전트")
@@ -60,12 +61,12 @@ if st.button("분석 시작"):
         # OpenAI LLM 초기화
         llm = OpenAI(temperature=0)
 
-        # 문서 처리
+        # 문서 처리 부분을 수정합니다
         with st.spinner("문서 처리 중..."):
-            text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+            text_splitter = CharacterTextSplitter(chunk_size=3000, chunk_overlap=200)
             
             if source_type == "텍스트":
-                texts = text_splitter.create_documents([doc_content])
+                texts = [Document(page_content=doc_content, metadata={})]
             elif source_type == "PDF" and uploaded_file:
                 pdf_loader = PyPDFLoader(uploaded_file)
                 texts = text_splitter.split_documents(pdf_loader.load())
@@ -79,8 +80,23 @@ if st.button("분석 시작"):
                 st.error("필요한 정보를 모두 입력해주세요.")
                 st.stop()
 
-            # 메타데이터에서 복잡한 값 필터링
-            texts = [filter_complex_metadata(doc) for doc in texts]
+            # 디버그 출력 추가
+            st.write("Texts 내용:", type(texts), len(texts))
+            if texts:
+                st.write("첫 번째 요소 타입:", type(texts[0]))
+
+            # 메타데이터에서 복잡한 값 필터링 (수정된 부분)
+            filtered_texts = []
+            for doc in texts:
+                if isinstance(doc, Document):
+                    filtered_texts.append(filter_complex_metadata(doc))
+                elif isinstance(doc, tuple) and len(doc) == 2:
+                    filtered_texts.append(Document(page_content=doc[0], metadata=doc[1]))
+                else:
+                    st.warning(f"예상치 못한 형식의 데이터: {type(doc)}")
+                    filtered_texts.append(doc)
+
+            texts = filtered_texts
 
             # 임베딩 및 벡터 저장소 생성
             embeddings = OpenAIEmbeddings()
@@ -145,3 +161,6 @@ st.sidebar.warning("""
 주의: 이 앱은 OpenAI, Notion, YouTube의 API를 사용합니다. 
 각 서비스의 사용 제한과 비용을 확인하세요.
 """)
+
+
+
