@@ -51,7 +51,7 @@ elif source_type == "PDF":
 elif source_type == "YouTube":
     youtube_url = st.text_input("YouTube 동영상 URL을 입력하세요:")
 elif source_type == "Notion":
-    notion_db_id = st.text_input("Notion 데이터베이스 ID를 입력하세요:")
+    notion_db_id = st.text_input("Notion 데이터베이스 ID를 입력하��:")
 
 # 사용자 질문 입력
 user_question = st.text_input("질문을 입력하세요:")
@@ -152,7 +152,7 @@ st.sidebar.markdown("""
 ## 앱 실행 방법
 1. 필요한 API 키를 입력하세요.
 2. 입력 소스를 선택하고 필요한 정보를 제공하세요.
-3. 질문을 입력하세요.
+3. 질문을 력���세요.
 4. "분석 시작" 버튼을 클릭하세요.
 """)
 

@@ -19,6 +19,10 @@ from urllib.parse import urlparse
 import re
 from langchain.prompts import PromptTemplate
 from langchain_community.utilities import SerpAPIWrapper
+import queue
+
+# 디버그 로그를 저장할 전역 큐
+debug_log_queue = queue.Queue()
 
 # 환경 변수 로드
 load_dotenv()
@@ -67,9 +71,10 @@ class State(TypedDict):
     search_results: str
     answer: str
     feedback: str
+    score: int
 
 # RAG 체인 생성
-llm = ChatOpenAI(model="gpt-4-0125-preview", temperature=0) # Don't change the model
+llm = ChatOpenAI(model="gpt-4o-mini-2024-07-18", temperature=0) # Don't change the model
 rag_chain = RetrievalQA.from_chain_type(
     llm=llm,
     chain_type="stuff",
@@ -103,19 +108,25 @@ def search_information(state: State) -> Dict:
         log_debug(f"인터넷 검색 결과: {search_results[:500]}...", 2)  # 결과의 일부만 로그에 기록
     except Exception as e:
         log_debug(f"인터넷 검색 중 오류 발생: {str(e)}", 2)
-        search_results = "인터넷 검색 실패"
+        search_results = "인터넷 검색 실패 또는 결과 없음"
     
     log_debug("RAG 및 인터넷 검색 완료", 2)
     return {
-        "rag_results": rag_results,
+        "rag_results": rag_results['result'] if isinstance(rag_results, dict) and 'result' in rag_results else str(rag_results),
         "search_results": search_results
     }
 
 def combine_information(state: State) -> Dict:
     log_debug("정보 결합 시작", 3)
-    combined_info = f"RAG 결과: {state['rag_results']}\n\n검색 결과: {state['search_results']}"
+    combined_info = f"RAG 결과: {state.get('rag_results', '결과 없음')}\n\n검색 결과: {state.get('search_results', '결과 없음')}"
     log_debug("정보 결합 완료", 3)
-    return {"combined_info": combined_info}
+    return {
+        "combined_info": combined_info,
+        "question": state["question"],
+        "legal_area": state.get("legal_area", ""),
+        "search_results": state.get("search_results", ""),
+        "rag_results": state.get("rag_results", "")
+    }
 
 def generate_answer(state: State) -> Dict:
     log_debug("답변 생성 시작", 4)
@@ -150,20 +161,39 @@ def generate_answer(state: State) -> Dict:
     )
     
     chain = prompt_template | llm | StrOutputParser()
-    answer = chain.invoke({"question": state["question"], "combined_info": state["combined_info"]})
+    
+    try:
+        combined_info = state.get("combined_info", "정보 없음")
+        answer = chain.invoke({"question": state["question"], "combined_info": combined_info})
+    except Exception as e:
+        log_debug(f"답변 생성 중 오류 발생: {str(e)}", 4)
+        answer = "죄송합니다. 답변을 생성하는 중에 오류가 발생했습니다."
+    
     log_debug("답변 생성 완료", 4)
     return {"answer": answer}
 
 def evaluate_answer(state: State) -> Dict:
     log_debug("답변 평가 시작", 5)
     prompt = ChatPromptTemplate.from_template(
-        "다음 답변의 품질을 평가해주세요. 답변: {answer}"
+        """
+        다음 답변의 품질을 1부터 10까지의 점수로 평가해주세요. 
+        점수만 숫자로 반환해 주세요.
+        
+        질문: {question}
+        답변: {answer}
+        """
     )
     chain = prompt | llm | StrOutputParser()
-    evaluation = chain.invoke({"answer": state["answer"]})
-    result = "END" if "좋음" in evaluation.lower() else "generate_answer"
-    log_debug(f"평가 결과: {result}", 5)
-    return {"feedback": evaluation, "result": result}
+    evaluation = chain.invoke({"question": state["question"], "answer": state["answer"]})
+    try:
+        score = int(evaluation.strip())
+        result = "END" if score >= 8 else "generate_answer"
+    except ValueError:
+        log_debug(f"점수 변환 실패. 원본 평가: {evaluation}", 5)
+        score = 0
+        result = "generate_answer"
+    log_debug(f"평가 결과: {result} (점수: {score})", 5)
+    return {"feedback": str(score), "result": result, "score": score}
 
 # 그래프 정의
 workflow = StateGraph(State)
@@ -212,11 +242,10 @@ timer_container = st.sidebar.empty()
 
 # 로그 출력 함수
 def log_debug(message, step=None):
-    if debug_mode:
-        if step:
-            message = f"Step {step}: {message}"
-        debug_container.markdown(f"```\n{message}\n```")
-        print(message)  # 터미널에도 출력
+    if step:
+        message = f"Step {step}: {message}"
+    debug_log_queue.put(message)
+    print(message)  # 터미널에도 출력
 
 # URL 추출 함수
 def extract_urls(text):
@@ -242,8 +271,9 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
 
     # AI 응답 생성
     with st.chat_message("assistant"):
-        message_placeholder = st.empty()
         full_response = ""
+        message_placeholder = st.empty()
+
 
         if mode == "RAG":
             # RAG 모드: FAISS 인덱스 테스트
@@ -256,6 +286,7 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
                 log_debug("인터넷 검색 실행", 2)
                 search_results = search.run(prompt)
                 
+                full_response = ""
                 message_placeholder = st.empty()
                 full_response = ""
                 
@@ -312,21 +343,43 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
                 search_results="",
                 combined_info="",
                 answer="",
-                feedback=""
+                feedback="",
+                score=0  # 초기 점수 추가
             )
-            
+             
             try:
                 log_debug("RAG Langgraph 모드 시작", 0)
                 start_time = time.time()
+                max_iterations = 10  # 최대 반복 횟수 설정
+                full_response = ""
+                message_placeholder = st.empty()
+                
                 for step, output in enumerate(app.stream(initial_state), 1):
+                    if step > max_iterations:
+                        log_debug(f"최대 반복 횟수 ({max_iterations})에 도달하여 종료", step)
+                        break
+                    
                     log_debug(f"Step {step} 실행", step)
                     if isinstance(output, Dict):
                         for key, value in output.items():
-                            if key in ["legal_area", "rag_results", "search_results", "combined_info", "answer", "feedback"]:
-                                full_response += f"{key.capitalize()}:\n{value}\n\n"
-                                message_placeholder.markdown(full_response + "▌")
+                            if key in ["legal_area", "rag_results", "search_results", "combined_info", "answer", "feedback", "score"]:
+                                if key == "score":
+                                    full_response += f"현재 답변 점수: {value}\n\n"
+                                elif key == "answer":
+                                    # 답변을 단어 단위로 스트리밍
+                                    current_answer = ""
+                                    for word in value.split():
+                                        current_answer += word + " "
+                                        full_response = f"{full_response}{current_answer}▌"
+                                        message_placeholder.markdown(full_response)
+                                        time.sleep(0.05)
+                                    full_response = full_response[:-1] + "\n\n"  # 마지막 '▌' 제거 및 줄바꿈 추가
+                                else:
+                                    full_response += f"{key.capitalize()}:\n{value}\n\n"
                                 
-                                log_message = f"{key}: {value[:500]}..." if len(value) > 500 else f"{key}: {value}"
+                                message_placeholder.markdown(full_response)
+                                
+                                log_message = f"{key}: {value[:500]}..." if isinstance(value, str) and len(value) > 500 else f"{key}: {value}"
                                 log_debug(log_message, step)
                                 st.session_state.debug_logs.append(log_message)
                             
@@ -349,23 +402,53 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
                     
                     elapsed_time = time.time() - start_time
                     timer_container.markdown(f"⏱️ 경과 시간: {elapsed_time:.2f}초")
-                                
+                       
                     if "result" in output and output["result"] == "END":
-                        log_debug("RAG Langgraph 모드 종료", step + 1)
-                        message_placeholder.markdown(full_response)
+                        log_debug(f"RAG Langgraph 모드 종료 (최종 점수: {output.get('score', 'N/A')})", step + 1)
+                        # 최종 답변 출력
+                        st.markdown("### 최종 답변")
+                        st.markdown(output.get("answer", "답변을 생성하지 못했습니다."))
                         break
-                
+                    
             except Exception as e:
                 st.error(f"오류 발생: {str(e)}")
                 log_debug(f"오류 상세 정보: {type(e).__name__}, {str(e)}")
                 import traceback
                 log_debug(f"스택 트레이스: {traceback.format_exc()}")
-        
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
-    
-    # 디버그 로그 표시
-    if debug_mode:
-        debug_container.text_area("디버그 로그", "\n".join(st.session_state.debug_logs), height=300)
+            
+            # 최종 답변이 출력되지 않았을 경우를 대비한 추가 출력
+            if "answer" not in locals():
+                st.warning("답변 생성 과정에서 문제가 발생했습니다. 다시 시도해 주세요.")
+            elif not st.session_state.messages[-1]["content"]:
+                st.markdown("### 최종 답변")
+                st.markdown(locals().get("answer", "답변을 생성하지 못했습니다."))
+            
+            full_response = ""
+            message_placeholder = st.empty()
+
+            # 마지막 메시지의 내용을 가져옵니다
+            if st.session_state.messages and isinstance(st.session_state.messages[-1], dict):
+                last_message = st.session_state.messages[-1].get('content', '')
+                for chunk in last_message.split():
+                    full_response += chunk + " "
+                    if chunk.endswith(('.', '!', '?', '\n')):
+                        full_response += "\n\n"
+                    time.sleep(0.05)
+                    message_placeholder.markdown(full_response + "▌")
+
+                message_placeholder.markdown(full_response)
+
+                # 마지막 메시지를 업데이트합니다
+                st.session_state.messages[-1]['content'] = full_response
+            else:
+                st.warning("메시지가 없거나 형식이 올바르지 않습니다.")
+
+        # 디버그 로그 표시
+        if debug_mode:
+            debug_logs = []
+            while not debug_log_queue.empty():
+                debug_logs.append(debug_log_queue.get())
+            debug_container.text_area("디버그 로그", "\n".join(debug_logs), height=300)
 
 # 피드백 수집 (사이드바로 이동)
 with st.sidebar:
@@ -373,7 +456,7 @@ with st.sidebar:
     feedback = st.text_area("답변에 대한 피드백을 남겨주세요:")
     if st.button("피드백 제출"):
         if feedback:
-            st.success("피드백이 제출되었습니다. 감사합니다!")
+            st.success("피드백이 제출되었습니다. 사합니다!")
             log_debug(f"피드백 제출: {feedback}")
         else:
             st.warning("피드백을 입력해주세요.")
