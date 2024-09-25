@@ -3,10 +3,12 @@ from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema import StrOutputParser
 from langgraph.graph import StateGraph, END
-from typing import Dict, TypedDict, Annotated
+from typing import Dict, TypedDict, Annotated, List
 import os
 from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
+from langchain.embeddings import CacheBackedEmbeddings
+from langchain.storage import LocalFileStore
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
@@ -33,12 +35,19 @@ os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
 # FAISS 인덱스 경로 설정
 FAISS_INDEX_PATH = "faiss_index"
 
+# 임베딩 설정
+underlying_embeddings = OpenAIEmbeddings()
+fs = LocalFileStore("./cache/")
+cached_embeddings = CacheBackedEmbeddings.from_bytes_store(
+    underlying_embeddings, fs, namespace=underlying_embeddings.model
+)
+
 # PDF 파일 로드 및 벡터 저장소 생성
 @st.cache_resource
 def create_vector_store():
     if os.path.exists(FAISS_INDEX_PATH):
         st.write("기존 FAISS 인덱스를 로드합니다.")
-        vector_store = FAISS.load_local(FAISS_INDEX_PATH, OpenAIEmbeddings(), allow_dangerous_deserialization=True)
+        vector_store = FAISS.load_local(FAISS_INDEX_PATH, cached_embeddings, allow_dangerous_deserialization=True)
     else:
         st.write("FAISS 인덱스가 없습니다. 새로 생성합니다.")
         vector_store = create_new_vector_store()
@@ -53,8 +62,7 @@ def create_new_vector_store():
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     texts = text_splitter.split_documents(documents)
     
-    embeddings = OpenAIEmbeddings()
-    vector_store = FAISS.from_documents(texts, embeddings)
+    vector_store = FAISS.from_documents(texts, cached_embeddings)
     
     # 벡터 저장소를 로컬에 저장
     vector_store.save_local(FAISS_INDEX_PATH)
@@ -100,20 +108,42 @@ def question_analysis(state: State) -> Dict:
 def search_information(state: State) -> Dict:
     log_debug("정보 검색 시작", 2)
     query = f"{state['legal_area']} {state['question']}"
+    print("query", query)
     rag_results = rag_chain.invoke(query)
-    
+    print("rag_results", rag_results)
     log_debug("인터넷 검색 시작", 2)
     try:
         search_results = search.run(query)
-        log_debug(f"인터넷 검색 결과: {search_results[:500]}...", 2)  # 결과의 일부만 로그에 기록
+        if not search_results:
+            search_results = "검색 결과가 없습니다."
+        log_debug(f"인터넷 검색 결과: {search_results[:500]}...", 2)
     except Exception as e:
         log_debug(f"인터넷 검색 중 오류 발생: {str(e)}", 2)
         search_results = "인터넷 검색 실패 또는 결과 없음"
     
     log_debug("RAG 및 인터넷 검색 완료", 2)
+    
+    # 검색 결과를 파싱하여 소스 정보 추출
+    sources = parse_search_results(search_results)
+    print(sources)
+    log_debug(f"state 객체 내용: {state}", 2)
     return {
         "rag_results": rag_results['result'] if isinstance(rag_results, dict) and 'result' in rag_results else str(rag_results),
-        "search_results": search_results
+        "search_results": search_results,
+        "sources": sources
+    }
+
+def combine_information(state: State) -> Dict:
+    log_debug("정보 결합 시작", 3)
+    combined_info = f"RAG 결과: {state.get('rag_results', '결과 없음')}\n\n검색 결과: {state.get('search_results', '결과 없음')}"
+    log_debug(f"combined_info: {combined_info}", 3)
+    log_debug(f"state 객체 내용: {state}", 3)
+    return {
+        "combined_info": combined_info,
+        "question": state["question"],
+        "legal_area": state.get("legal_area", ""),
+        "search_results": state.get("search_results", ""),
+        "rag_results": state.get("rag_results", "")
     }
 
 def combine_information(state: State) -> Dict:
@@ -127,6 +157,51 @@ def combine_information(state: State) -> Dict:
         "search_results": state.get("search_results", ""),
         "rag_results": state.get("rag_results", "")
     }
+
+def parse_search_results(search_results: str) -> List[Dict]:
+    sources = []
+    urls = re.findall(r'(https?://\S+)', search_results)
+    
+    for url in urls[:5]:  # 최대 5개의 소스만 처리
+        try:
+            response = requests.get(url, timeout=5)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            title = soup.title.string if soup.title else "제목 없음"
+            description = soup.find('meta', attrs={'name': 'description'})
+            description = description['content'] if description else "설명 없음"
+            
+            icon = soup.find('link', rel='icon') or soup.find('link', rel='shortcut icon')
+            icon_url = icon['href'] if icon else ""
+            if icon_url and not icon_url.startswith('http'):
+                icon_url = f"{url.split('//', 1)[0]}//{url.split('//', 1)[1].split('/', 1)[0]}{icon_url}"
+            
+            sources.append({
+                "title": title,
+                "url": url,
+                "description": description[:100] + "..." if len(description) > 100 else description,
+                "icon_url": icon_url
+            })
+        except Exception as e:
+            log_debug(f"URL 파싱 중 오류 발생: {str(e)}", 2)
+    
+    return sources
+
+# Streamlit UI 부분
+def display_search_results(sources: List[Dict]):
+    st.subheader("관련 정보")
+    for source in sources:
+        with st.expander(source['title']):
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if source['icon_url']:
+                    st.image(source['icon_url'], width=50)
+                else:
+                    st.write("🌐")
+            with col2:
+                st.markdown(f"[{source['url']}]({source['url']})")
+                st.write(source['description'])
+
 
 def generate_answer(state: State) -> Dict:
     log_debug("답변 생성 시작", 4)
@@ -164,9 +239,12 @@ def generate_answer(state: State) -> Dict:
     
     try:
         combined_info = state.get("combined_info", "정보 없음")
+        log_debug(f"combined_info: {combined_info}", 4)
         answer = chain.invoke({"question": state["question"], "combined_info": combined_info})
     except Exception as e:
         log_debug(f"답변 생성 중 오류 발생: {str(e)}", 4)
+        import traceback
+        log_debug(f"스택 트레이스: {traceback.format_exc()}", 4)
         answer = "죄송합니다. 답변을 생성하는 중에 오류가 발생했습니다."
     
     log_debug("답변 생성 완료", 4)
@@ -228,8 +306,8 @@ app = workflow.compile()
 # 앱 인터페이스
 st.title("법률 AI 상담 시스템")
 
-# 모드 선택
-mode = st.radio("모드 선택", ["RAG", "RAG Langgraph"])
+# 네비게이션 메뉴 생성
+page = st.sidebar.selectbox("모드 선택", ["RAG", "RAG Langgraph"])
 
 # 디버그 모드 토글 추가
 debug_mode = st.sidebar.checkbox("디버그 모드", value=True)
@@ -246,11 +324,6 @@ def log_debug(message, step=None):
         message = f"Step {step}: {message}"
     debug_log_queue.put(message)
     print(message)  # 터미널에도 출력
-
-# URL 추출 함수
-def extract_urls(text):
-    url_pattern = re.compile(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
-    return url_pattern.findall(text)
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
@@ -274,8 +347,7 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
         full_response = ""
         message_placeholder = st.empty()
 
-
-        if mode == "RAG":
+        if page == "RAG":
             # RAG 모드: FAISS 인덱스 테스트
             try:
                 log_debug("RAG 모드 시작", 0)
@@ -300,29 +372,19 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
                 
                 message_placeholder.markdown(full_response)
                 
-                log_debug("출처 표시", 4)
-                st.markdown("### 출처")
-                cols = st.columns(3)
-                for i, doc in enumerate(response['source_documents'], 1):
-                    source = doc.metadata.get('source', 'Unknown')
-                    page = doc.metadata.get('page', 'N/A')
-                    content = doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content
-                    
-                    with cols[i % 3]:
-                        with st.expander(f"출처 {i}: {source} (페이지 {page})"):
-                            st.markdown(content)
-                
-                log_debug("인터넷 검색 결과 표시", 5)
-                st.markdown("### 인터넷 검색 결과")
-                cols = st.columns(3)
+                log_debug("소스 정보 추출 및 표시", 4)
+                sources = []
                 urls = extract_urls(search_results)
-                for i, url in enumerate(urls):
+                for url in urls[:5]:
                     title, image_url = get_webpage_info(url)
-                    with cols[i % 3]:
-                        with st.expander(title):
-                            st.markdown(f"[{url}]({url})")
-                            if image_url:
-                                st.image(image_url, width=200)
+                    sources.append({
+                        "type": "인터넷 검색",
+                        "url": url,
+                        "title": title,
+                        "image_url": image_url
+                    })
+                
+                display_sources(sources)
                 
                 elapsed_time = time.time() - start_time
                 timer_container.markdown(f"⏱️ 경과 시간: {elapsed_time:.2f}초")
@@ -334,7 +396,7 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
                 import traceback
                 log_debug(f"스택 트레이스: {traceback.format_exc()}")
         
-        elif mode == "RAG Langgraph":
+        elif page == "RAG Langgraph":
             # RAG Langgraph 모드
             initial_state = State(
                 question=prompt,
@@ -383,22 +445,9 @@ if prompt := st.chat_input("법률 관련 질문을 입력해주세요:"):
                                 log_debug(log_message, step)
                                 st.session_state.debug_logs.append(log_message)
                             
-                        if key == "search_results":
-                            log_debug("인터넷 검색 결과 처리", step)
-                            st.markdown("### 인터넷 검색 결과")
-                            urls = extract_urls(value)
-                            if urls:
-                                cols = st.columns(3)
-                                for i, url in enumerate(urls):
-                                    title, image_url = get_webpage_info(url)
-                                    with cols[i % 3]:
-                                        with st.expander(title):
-                                            st.markdown(f"[{url}]({url})")
-                                            if image_url:
-                                                st.image(image_url, width=200)
-                            else:
-                                st.warning("검색 결과에서 URL을 찾을 수 없습니다.")
-                                log_debug("검색 결과에서 URL을 찾을 수 없음", step)
+                        if key == "sources":
+                            log_debug("소스 정보 표시", step)
+                            display_search_results(value)
                     
                     elapsed_time = time.time() - start_time
                     timer_container.markdown(f"⏱️ 경과 시간: {elapsed_time:.2f}초")
@@ -456,18 +505,10 @@ with st.sidebar:
     feedback = st.text_area("답변에 대한 피드백을 남겨주세요:")
     if st.button("피드백 제출"):
         if feedback:
-            st.success("피드백이 제출되었습니다. 사합니다!")
+            st.success("피드백이 제출되었습니다. 감사합니다!")
             log_debug(f"피드백 제출: {feedback}")
         else:
             st.warning("피드백을 입력해주세요.")
 
-def get_webpage_info(url):
-    try:
-        response = requests.get(url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        title = soup.title.string if soup.title else "제목 없음"
-        og_image = soup.find("meta", property="og:image")
-        image_url = og_image["content"] if og_image else None
-        return title, image_url
-    except:
-        return "제목 없음", None
+
+
