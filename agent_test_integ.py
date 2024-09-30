@@ -1,8 +1,7 @@
-
 from langchain_community.agents import AgentType, initialize_agent
-from langchain_community.llms import OpenAI
+from langchain_openai import ChatOpenAI
 from langchain.tools import Tool
-from langchain.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain.vectorstores import Chroma
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.document_loaders import TextLoader, PyPDFLoader, YoutubeLoader
@@ -11,7 +10,7 @@ from langchain_community.document_loaders import NotionDBLoader
 from langchain_community.utilities import YouTubeSearchAPIWrapper
 
 # OpenAI LLM 초기화
-llm = OpenAI(temperature=0)
+llm = ChatOpenAI(temperature=0)
 
 # 문서 로드 및 처리 함수
 def load_and_process_documents(loader):
